@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/gen2brain/beeep"
 	"github.com/google/uuid"
 	"github.com/otiai10/copy"
 	"github.com/pkg/sftp"
@@ -23,8 +24,8 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
-const path = "/Users/lemmer/updog" // "/Volumes"
-const tmpdir = "/Users/lemmer/updog/tmp"
+const path = "/Volumes" // "/Users/lemmer/updog" // "/Volumes"
+const tmpdir = "/tmp"   // "/Users/lemmer/updog/tmp"
 
 var currentDirs = make(map[string]bool)
 
@@ -140,9 +141,6 @@ func uploadFiles(files map[string]bool, conf *Config) {
 func main() {
 
 	conf := LoadConfig()
-	_ = conf
-	fmt.Println(conf.Host)
-	//ploadFile("/hohoho/chiken", "chiken", conf)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -170,7 +168,9 @@ func main() {
 	done := make(chan bool)
 	go func() {
 		for {
+
 			select {
+
 			case event, ok := <-watcher.Events:
 				_ = event
 				if !ok {
@@ -228,6 +228,9 @@ func main() {
 							log.Printf("source: %s\ndest: %s", src, dest)
 
 							// add wait here until drive is ready
+							timer := time.NewTimer(1 * time.Second)
+							<-timer.C
+							timer.Stop()
 
 							err = copy.Copy(src, dest)
 							if err != nil {
@@ -283,6 +286,10 @@ func main() {
 
 				if hasIncremental {
 					wg.Wait()
+					err := beeep.Notify("Title", "Safe to remove USB drive", "assets/information.png")
+					if err != nil {
+						panic(err)
+					}
 					log.Printf("Safe to remove USB drive")
 				}
 
@@ -292,6 +299,7 @@ func main() {
 				}
 				log.Println("error:", err)
 			}
+
 		}
 	}()
 
