@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +9,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,12 +16,15 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
+	"github.com/otiai10/copy"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
 
 const path = "/Users/lemmer/updog" // "/Volumes"
+const tmpdir = "/Users/lemmer/updog/tmp"
 
 var currentDirs = make(map[string]bool)
 
@@ -54,15 +55,17 @@ func LoadConfig() *Config {
 	return config
 }
 
-func uploadFile(path, filename string, conf *Config) {
+// uploadFiles parameters:
+//	files: path relative to tmpdir; true = file, false = dir
+//	conf: SFTP parameters
+func uploadFiles(files map[string]bool, conf *Config) {
 	var auths []ssh.AuthMethod
 	if aconn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
 		auths = append(auths, ssh.PublicKeysCallback(agent.NewClient(aconn).Signers))
 
 	}
-	//	if *PASS != "" {
+
 	auths = append(auths, ssh.Password(conf.Password))
-	//	}
 
 	config := ssh.ClientConfig{
 		User:            conf.Username,
@@ -82,42 +85,56 @@ func uploadFile(path, filename string, conf *Config) {
 	}
 	defer c.Close()
 
-	c.MkdirAll(path)
+	for path, isFile := range files {
+		if !isFile {
+			c.MkdirAll(path)
+		}
+	}
 
-	w, err := c.Create("/chiken.txt")
-	if err != nil {
-		log.Fatal(err)
-	}
-	w.Close()
+	for path, isFile := range files {
+		if isFile {
 
-	w, err = c.OpenFile("/chiken.txt", syscall.O_WRONLY)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer w.Close()
+			w, err := c.Create(path)
+			if err != nil {
+				log.Fatal(err)
+			}
+			w.Close()
 
-	f, err := os.Open("/Users/lemmer/updog/NO NAME/chiken.txt")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
+			w, err = c.OpenFile(path, syscall.O_WRONLY)
+			if err != nil {
+				log.Fatal(err)
+			}
 
-	stat, err := f.Stat()
-	if err != nil {
-		log.Fatal(err)
-	}
-	size := stat.Size()
+			f, err := os.Open(tmpdir + "/" + path)
+			if err != nil {
+				log.Fatal(err)
+			}
 
-	log.Printf("writing %v bytes", size)
-	t1 := time.Now()
-	n, err := io.Copy(w, io.LimitReader(f, int64(size)))
-	if err != nil {
-		log.Fatal(err)
+			stat, err := f.Stat()
+			if err != nil {
+				log.Fatal(err)
+			}
+			size := stat.Size()
+
+			log.Printf("writing %v bytes", size)
+			t1 := time.Now()
+			n, err := io.Copy(w, io.LimitReader(f, int64(size)))
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			w.Close()
+			f.Close()
+
+			if n != size {
+				log.Printf("copy: expected %v bytes, got %d", size, n)
+			} else {
+				log.Printf("wrote %v bytes in %s", size, time.Since(t1))
+				os.Remove(tmpdir + "/" + path)
+			}
+
+		}
 	}
-	if n != size {
-		log.Fatalf("copy: expected %v bytes, got %d", size, n)
-	}
-	log.Printf("wrote %v bytes in %s", size, time.Since(t1))
 }
 
 func main() {
@@ -194,36 +211,54 @@ func main() {
 
 						go func(volume string) {
 
-							out, err := exec.Command("cp", "-r", path+"/"+volume+"/", "/tmp/"+volume+"/").Output()
+							//lwg := &sync.WaitGroup{}
+
+							newuuid := uuid.New().String()
+
+							src := path + "/" + volume + "/"
+							dest := tmpdir + "/" + newuuid + "/"
+
+							err := os.MkdirAll(dest, 0777)
+
 							if err != nil {
 								fmt.Printf("%s", err)
-							}
-							_ = out
 
-							dirs := make(map[string]bool)
+							}
+
+							log.Printf("source: %s\ndest: %s", src, dest)
+
+							// add wait here until drive is ready
+
+							err = copy.Copy(src, dest)
+							if err != nil {
+								log.Fatalf("%s", err)
+							}
+
 							files := make(map[string]bool)
 
-							err = filepath.Walk("/tmp/"+volume+"/", func(path string, info fs.FileInfo, err error) error {
-								wg.Add(1)
+							err = filepath.Walk(dest, func(fpath string, info fs.FileInfo, err error) error {
+
 								if err != nil {
-									log.Printf("prevent panic by handling failure accessing a path %q: %v\n", path, err)
+									log.Printf("prevent panic by handling failure accessing a path %q: %v\n", fpath, err)
 									return err
 								}
 
-								path = path[1:]
-								//								path = path[strings.Index(path, "/"):]
+								idx := strings.Index(fpath, dest)
 
-								if info.Mode().IsDir() {
-									dirs[path] = true
-								} else {
-									files[path] = true
+								fpath = fpath[idx+len(dest):]
+
+								if len(fpath) > 0 {
+
+									files[newuuid+"/"+fpath] = !info.Mode().IsDir()
+
 								}
-
-								wg.Done()
 
 								return nil
 							})
-							log.Printf("something")
+
+							//							log.Printf("something")
+
+							uploadFiles(files, conf)
 
 							wg.Done()
 
@@ -265,37 +300,4 @@ func main() {
 		log.Fatal(err)
 	}
 	<-done
-}
-
-func getHostKey(host string) ssh.PublicKey {
-	// parse OpenSSH known_hosts file
-	// ssh or use ssh-keyscan to get initial key
-	file, err := os.Open(filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	var hostKey ssh.PublicKey
-	for scanner.Scan() {
-		fields := strings.Split(scanner.Text(), " ")
-		if len(fields) != 3 {
-			continue
-		}
-		if strings.Contains(fields[0], host) {
-			var err error
-			hostKey, _, _, _, err = ssh.ParseAuthorizedKey(scanner.Bytes())
-			if err != nil {
-				log.Fatalf("error parsing %q: %v", fields[2], err)
-			}
-			break
-		}
-	}
-
-	if hostKey == nil {
-		log.Fatalf("no hostkey found for %s", host)
-	}
-
-	return hostKey
 }
