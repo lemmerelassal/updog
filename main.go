@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,7 +17,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/gen2brain/beeep"
 	"github.com/google/uuid"
 	"github.com/otiai10/copy"
 	"github.com/pkg/sftp"
@@ -35,6 +35,8 @@ type Config struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
+
+// load config from json file
 
 func LoadConfig() *Config {
 	file, err := os.Open("conf.json")
@@ -177,7 +179,10 @@ func main() {
 					return
 				}
 
-				//log.Printf("event %v:", event)
+				// add wait here until drive is ready
+				timer := time.NewTimer(1 * time.Second)
+				<-timer.C
+				timer.Stop()
 
 				files, err := ioutil.ReadDir(path)
 
@@ -227,15 +232,24 @@ func main() {
 
 							log.Printf("source: %s\ndest: %s", src, dest)
 
-							// add wait here until drive is ready
-							timer := time.NewTimer(1 * time.Second)
-							<-timer.C
-							timer.Stop()
-
 							err = copy.Copy(src, dest)
 							if err != nil {
-								log.Fatalf("%s", err)
+								log.Printf("error copying usb stick: %v", err)
 							}
+
+							volpath, err := exec.Command("bash", "-c", "df | grep \""+volume+"\"").Output()
+							if err != nil {
+								log.Printf("df errror %v", err)
+							}
+
+							volpath = volpath[:strings.Index(string(volpath), " ")]
+							fmt.Printf("The volume path is %s\n", volpath)
+
+							out, err := exec.Command("diskutil", "umount", string(volpath)).Output()
+							if err != nil {
+								log.Printf("diskutil umount error: %v", err)
+							}
+							log.Printf("%s", out)
 
 							files := make(map[string]bool)
 
@@ -258,8 +272,9 @@ func main() {
 
 								return nil
 							})
-
-							//							log.Printf("something")
+							if err != nil {
+								log.Printf("filepath.Walk error: %v\n", err)
+							}
 
 							uploadFiles(files, conf)
 
@@ -286,11 +301,11 @@ func main() {
 
 				if hasIncremental {
 					wg.Wait()
-					err := beeep.Notify("Title", "Safe to remove USB drive", "assets/information.png")
-					if err != nil {
-						panic(err)
-					}
-					log.Printf("Safe to remove USB drive")
+					/* 					err := beeep.Notify("Title", "Safe to remove USB drive", "assets/information.png")
+					   					if err != nil {
+					   						log.Printf("error in beeep: %v", err)
+					   					}
+					   					log.Printf("Safe to remove USB drive") */
 				}
 
 			case err, ok := <-watcher.Errors:
@@ -305,7 +320,7 @@ func main() {
 
 	err = watcher.Add(path)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("watcher error: %v", err)
 	}
 	<-done
 }
