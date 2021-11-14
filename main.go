@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -34,6 +35,7 @@ type Config struct {
 	Port     string `json:"port"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+	//RetryCount string `json: "retrycount"`
 }
 
 // load config from json file
@@ -61,7 +63,7 @@ func LoadConfig() *Config {
 // uploadFiles parameters:
 //	files: path relative to tmpdir; true = file, false = dir
 //	conf: SFTP parameters
-func uploadFiles(files map[string]bool, conf *Config) {
+func uploadFiles(files map[string]bool, conf *Config) (map[string]bool, error) {
 	var auths []ssh.AuthMethod
 	if aconn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
 		auths = append(auths, ssh.PublicKeysCallback(agent.NewClient(aconn).Signers))
@@ -93,6 +95,10 @@ func uploadFiles(files map[string]bool, conf *Config) {
 			c.MkdirAll(path)
 		}
 	}
+
+	newError := ""
+
+	remainingFiles := make(map[string]bool)
 
 	for path, isFile := range files {
 		if isFile {
@@ -130,7 +136,13 @@ func uploadFiles(files map[string]bool, conf *Config) {
 			f.Close()
 
 			if n != size {
-				log.Printf("copy: expected %v bytes, got %d", size, n)
+				if len(newError) > 0 {
+					newError += "\n"
+				}
+
+				newError += fmt.Sprintf("%s: expected %v bytes, got %d", path, size, n)
+				remainingFiles[path] = files[path]
+
 			} else {
 				log.Printf("wrote %v bytes in %s", size, time.Since(t1))
 				os.Remove(tmpdir + "/" + path)
@@ -138,6 +150,10 @@ func uploadFiles(files map[string]bool, conf *Config) {
 
 		}
 	}
+	if len(newError) > 0 {
+		return remainingFiles, errors.New(newError)
+	}
+	return remainingFiles, nil
 }
 
 func main() {
@@ -276,7 +292,15 @@ func main() {
 								log.Printf("filepath.Walk error: %v\n", err)
 							}
 
-							uploadFiles(files, conf)
+							doneUploading := false
+							for !doneUploading {
+								files, err = uploadFiles(files, conf)
+								doneUploading = true
+								if err != nil {
+									log.Printf("error uploading files: %v", err)
+									doneUploading = false
+								}
+							}
 
 							wg.Done()
 
