@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,74 +27,77 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
-const path = "/Volumes" // "/Users/lemmer/updog" // "/Volumes"
-const tmpdir = "/tmp"   // "/Users/lemmer/updog/tmp"
-
-var currentDirs = make(map[string]bool)
-
-type Config struct {
+type config struct {
 	Host     string `json:"host"`
 	Port     string `json:"port"`
 	Username string `json:"username"`
 	Password string `json:"password"`
-	//RetryCount string `json: "retrycount"`
+	Path     string `json:"path"`
+	Tmpdir   string `json:"tmpdir"`
 }
 
-// load config from json file
+func (c *config) init(args []string) error {
 
-func LoadConfig() *Config {
-	file, err := os.Open("conf.json")
+	file, err := os.Open("/etc/updog.json")
 
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	defer file.Close()
 
-	config := &Config{}
+	config := &config{}
 	decoder := json.NewDecoder(file)
 	err = decoder.Decode(config)
 
 	if err != nil {
-		panic(err)
+		return err
 	}
 
-	return config
+	c.Host = config.Host
+	c.Password = config.Password
+	c.Port = config.Port
+	c.Username = config.Username
+	c.Tmpdir = config.Tmpdir
+	c.Path = config.Path
+
+	return nil
+
 }
 
 // uploadFiles parameters:
 //	files: path relative to tmpdir; true = file, false = dir
 //	conf: SFTP parameters
-func uploadFiles(files map[string]bool, conf *Config) (map[string]bool, error) {
+func (c *config) uploadFiles(files map[string]bool) (map[string]bool, error) {
 	var auths []ssh.AuthMethod
 	if aconn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
 		auths = append(auths, ssh.PublicKeysCallback(agent.NewClient(aconn).Signers))
 
 	}
 
-	auths = append(auths, ssh.Password(conf.Password))
+	auths = append(auths, ssh.Password(c.Password))
 
 	config := ssh.ClientConfig{
-		User:            conf.Username,
+		User:            c.Username,
 		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
-	addr := fmt.Sprintf("%s:%s", conf.Host, conf.Port)
+	addr := fmt.Sprintf("%s:%s", c.Host, c.Port)
 	conn, err := ssh.Dial("tcp", addr, &config)
 	if err != nil {
 		log.Fatalf("unable to connect to [%s]: %v", addr, err)
 	}
 	defer conn.Close()
 
-	c, err := sftp.NewClient(conn, sftp.MaxPacket(1<<15))
+	client, err := sftp.NewClient(conn, sftp.MaxPacket(1<<15))
 	if err != nil {
 		log.Fatalf("unable to start sftp subsytem: %v", err)
 	}
-	defer c.Close()
+	defer client.Close()
 
 	for path, isFile := range files {
 		if !isFile {
-			c.MkdirAll(path)
+			client.MkdirAll(path)
 		}
 	}
 
@@ -103,18 +108,18 @@ func uploadFiles(files map[string]bool, conf *Config) (map[string]bool, error) {
 	for path, isFile := range files {
 		if isFile {
 
-			w, err := c.Create(path)
+			w, err := client.Create(path)
 			if err != nil {
 				log.Fatal(err)
 			}
 			w.Close()
 
-			w, err = c.OpenFile(path, syscall.O_WRONLY)
+			w, err = client.OpenFile(path, syscall.O_WRONLY)
 			if err != nil {
 				log.Fatal(err)
 			}
 
-			f, err := os.Open(tmpdir + "/" + path)
+			f, err := os.Open(c.Tmpdir + "/" + path)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -145,7 +150,7 @@ func uploadFiles(files map[string]bool, conf *Config) (map[string]bool, error) {
 
 			} else {
 				log.Printf("wrote %v bytes in %s", size, time.Since(t1))
-				os.Remove(tmpdir + "/" + path)
+				os.Remove(c.Tmpdir + "/" + path)
 			}
 
 		}
@@ -157,20 +162,58 @@ func uploadFiles(files map[string]bool, conf *Config) (map[string]bool, error) {
 }
 
 func main() {
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
 
-	conf := LoadConfig()
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGHUP)
+
+	c := &config{}
+
+	defer func() {
+		signal.Stop(signalChan)
+		cancel()
+	}()
+
+	go func() {
+		for {
+			select {
+			case s := <-signalChan:
+				switch s {
+				case syscall.SIGHUP:
+					c.init(os.Args)
+				case os.Interrupt:
+					cancel()
+					os.Exit(1)
+				}
+			case <-ctx.Done():
+				log.Printf("Done.")
+				os.Exit(1)
+			}
+		}
+	}()
+
+	if err := run(ctx, c, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, c *config, stdout io.Writer) error {
+	c.init(os.Args)
+	log.SetOutput(os.Stdout)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer watcher.Close()
 
-	files, err := ioutil.ReadDir(path)
+	files, err := ioutil.ReadDir(c.Path)
 
 	if err != nil {
 
-		log.Fatal(err)
+		return err
 	}
 
 	currentDirs := make(map[string]bool)
@@ -183,11 +226,14 @@ func main() {
 
 	}
 
-	done := make(chan bool)
+	done := make(chan error)
 	go func() {
 		for {
 
 			select {
+
+			case <-ctx.Done():
+				done <- nil
 
 			case event, ok := <-watcher.Events:
 				_ = event
@@ -200,7 +246,7 @@ func main() {
 				<-timer.C
 				timer.Stop()
 
-				files, err := ioutil.ReadDir(path)
+				files, err := ioutil.ReadDir(c.Path)
 
 				if err != nil {
 
@@ -236,8 +282,8 @@ func main() {
 
 							newuuid := uuid.New().String()
 
-							src := path + "/" + volume + "/"
-							dest := tmpdir + "/" + newuuid + "/"
+							src := c.Path + "/" + volume + "/"
+							dest := c.Tmpdir + "/" + newuuid + "/"
 
 							err := os.MkdirAll(dest, 0777)
 
@@ -294,7 +340,7 @@ func main() {
 
 							doneUploading := false
 							for !doneUploading {
-								files, err = uploadFiles(files, conf)
+								files, err = c.uploadFiles(files)
 								doneUploading = true
 								if err != nil {
 									log.Printf("error uploading files: %v", err)
@@ -342,9 +388,11 @@ func main() {
 		}
 	}()
 
-	err = watcher.Add(path)
+	err = watcher.Add(c.Path)
 	if err != nil {
 		log.Printf("watcher error: %v", err)
 	}
-	<-done
+	err = <-done
+	return err
+
 }
