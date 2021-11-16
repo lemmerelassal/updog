@@ -21,7 +21,6 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
-	"github.com/otiai10/copy"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -149,7 +148,7 @@ func (c *config) uploadFiles(files map[string]bool) (map[string]bool, error) {
 				remainingFiles[path] = files[path]
 
 			} else {
-				log.Printf("wrote %v bytes in %s", size, time.Since(t1))
+				log.Printf("uploaded %v bytes in %s", size, time.Since(t1))
 				os.Remove(c.Tmpdir + "/" + path)
 			}
 
@@ -294,7 +293,9 @@ func run(ctx context.Context, c *config, stdout io.Writer) error {
 
 							log.Printf("source: %s\ndest: %s", src, dest)
 
-							err = copy.Copy(src, dest)
+							//err = copy.Copy(src, dest)
+							_, err = exec.Command("bash", "-c", "sudo cp -r \""+src+"\" \""+dest+"\"").Output()
+
 							if err != nil {
 								log.Printf("error copying usb stick: %v", err)
 							}
@@ -347,6 +348,8 @@ func run(ctx context.Context, c *config, stdout io.Writer) error {
 									doneUploading = false
 								}
 							}
+
+							log.Printf("finished uploading")
 
 							wg.Done()
 
