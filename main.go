@@ -225,6 +225,9 @@ func run(ctx context.Context, c *config, stdout io.Writer) error {
 
 	}
 
+	exclude := make(map[string]bool)
+	exclude["Recovery"] = true
+
 	done := make(chan error)
 	go func() {
 		for {
@@ -269,6 +272,11 @@ func run(ctx context.Context, c *config, stdout io.Writer) error {
 				wg := &sync.WaitGroup{}
 
 				for k := range tempDirs {
+
+					if _, ok := exclude[k]; ok {
+						continue
+					}
+
 					if _, ok := currentDirs[k]; !ok {
 
 						log.Printf("\nNew volume: %s", k)
