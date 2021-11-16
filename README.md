@@ -21,5 +21,5 @@ sudo launchctl load /Library/LaunchDaemons/com.lemmerelassal.updog.plist
 To view logs:
 
 ```
-tail -f /tmp/updog.\*
+tail -f /tmp/updog.*
 ```
