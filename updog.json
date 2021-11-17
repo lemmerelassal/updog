@@ -4,5 +4,6 @@
   "username": "u83795859-qq",
   "password": "MJsecYAswAk3tR",
   "path": "/Volumes",
-  "tmpdir": "/tmp"
+  "tmpdir": "/tmp",
+  "hashespath": "/etc/updog.db"
 }

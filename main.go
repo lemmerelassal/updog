@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,12 +29,108 @@ import (
 )
 
 type config struct {
-	Host     string `json:"host"`
-	Port     string `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Path     string `json:"path"`
-	Tmpdir   string `json:"tmpdir"`
+	Host       string `json:"host"`
+	Port       string `json:"port"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	Path       string `json:"path"`
+	Tmpdir     string `json:"tmpdir"`
+	HashesPath string `json:"hashespath"`
+	HashMap    map[string]string
+}
+
+func (c *config) calculateHash(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		log.Fatal(err)
+	}
+
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func writeGob(filePath string, object interface{}) error {
+	file, err := os.Create(filePath)
+	if err == nil {
+		encoder := gob.NewEncoder(file)
+		encoder.Encode(object)
+	}
+	file.Close()
+	return err
+}
+
+func readGob(filePath string, object interface{}) error {
+	file, err := os.Open(filePath)
+	if err == nil {
+		decoder := gob.NewDecoder(file)
+		err = decoder.Decode(object)
+	}
+	file.Close()
+	return err
+}
+
+func (c *config) loadHashTable() {
+
+	err := readGob(c.HashesPath, &c.HashMap)
+	if err != nil {
+		log.Fatalf("Unable to access hash table at location %s, error = %v", c.HashesPath, err)
+	}
+	log.Printf("hash table loaded, %d entries", len(c.HashMap))
+	if len(c.HashMap) == 0 {
+		c.HashMap["chiken"] = "chiken"
+		c.saveHashTable()
+	}
+
+	/*	return
+
+		file, err := os.OpenFile(c.HashesPath, os.O_RDWR|os.O_CREATE, 777) // change permission later
+		if err != nil {
+			log.Fatalf("Unable to access hash table at location %s, error = %v", c.HashesPath, err)
+		}
+
+		defer file.Close()
+
+		decoder := gob.NewDecoder(file)
+
+		temp := make(map[string]string)
+
+		err = decoder.Decode(&temp)
+		if err != nil {
+			log.Printf("Error decoding, initializing hashtable")
+			temp = make(map[string]string)
+			temp["chiken"] = "chiken"
+			c.saveHashTable()
+		}
+		c.HashMap = temp
+
+		log.Printf("hash table loaded, %d entries", len(c.HashMap))*/
+
+}
+
+func (c *config) saveHashTable() {
+
+	writeGob(c.HashesPath, c.HashMap)
+	/*	return
+
+		var buf1 bytes.Buffer
+		enc := gob.NewEncoder(&buf1)
+		err := enc.Encode(c.HashMap)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// write to file
+		err = ioutil.WriteFile(c.HashesPath, buf1.Bytes(), 0666)
+		if err != nil {
+			log.Fatalf("Error saving hash table (path = %s, err = %v)", c.HashesPath, err)
+		}
+		log.Printf("chiken")*/
+
 }
 
 func (c *config) init(args []string) error {
@@ -59,6 +157,9 @@ func (c *config) init(args []string) error {
 	c.Username = config.Username
 	c.Tmpdir = config.Tmpdir
 	c.Path = config.Path
+	c.HashesPath = config.HashesPath
+
+	c.loadHashTable()
 
 	return nil
 
@@ -68,6 +169,22 @@ func (c *config) init(args []string) error {
 //	files: path relative to tmpdir; true = file, false = dir
 //	conf: SFTP parameters
 func (c *config) uploadFiles(files map[string]bool) (map[string]bool, error) {
+
+	hasUnique := false
+	for file, isFile := range files {
+		if isFile {
+			hash := c.calculateHash(file)
+			if _, ok := c.HashMap[hash]; !ok {
+				hasUnique = true
+				c.HashMap[hash] = file
+			}
+		}
+	}
+
+	if !hasUnique {
+		return nil, nil
+	}
+
 	var auths []ssh.AuthMethod
 	if aconn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
 		auths = append(auths, ssh.PublicKeysCallback(agent.NewClient(aconn).Signers))
@@ -358,6 +475,7 @@ func run(ctx context.Context, c *config, stdout io.Writer) error {
 							}
 
 							log.Printf("finished uploading")
+							c.saveHashTable()
 
 							wg.Done()
 
