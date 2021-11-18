@@ -66,6 +66,12 @@ func writeGob(filePath string, object interface{}) error {
 
 func readGob(filePath string, object interface{}) error {
 	file, err := os.Open(filePath)
+	if err != nil {
+		file, err = os.Create(filePath)
+		if err != nil {
+			log.Fatalf("unable to create database: %v", err)
+		}
+	}
 	if err == nil {
 		decoder := gob.NewDecoder(file)
 		err = decoder.Decode(object)
@@ -78,7 +84,9 @@ func (c *config) loadHashTable() {
 
 	err := readGob(c.HashesPath, &c.HashMap)
 	if err != nil {
-		log.Fatalf("Unable to access hash table at location %s, error = %v", c.HashesPath, err)
+		log.Printf("Unable to access hash table at location %s, error = %v", c.HashesPath, err)
+		log.Printf("Creating new hashtable")
+		c.HashMap = make(map[string]string)
 	}
 	log.Printf("hash table loaded, %d entries", len(c.HashMap))
 	if len(c.HashMap) == 0 {
@@ -173,13 +181,15 @@ func (c *config) uploadFiles(files map[string]bool) (map[string]bool, error) {
 	hasUnique := false
 	for file, isFile := range files {
 		if isFile {
-			hash := c.calculateHash(file)
+			log.Printf("calculating hash for %s", file)
+			hash := c.calculateHash(c.Tmpdir + "/" + file)
 			if _, ok := c.HashMap[hash]; !ok {
 				hasUnique = true
 				c.HashMap[hash] = file
 			}
 		}
 	}
+	c.saveHashTable()
 
 	if !hasUnique {
 		return nil, nil
@@ -433,13 +443,18 @@ func run(ctx context.Context, c *config, stdout io.Writer) error {
 							volpath = volpath[:strings.Index(string(volpath), " ")]
 							fmt.Printf("The volume path is %s\n", volpath)
 
-							out, err := exec.Command("diskutil", "umount", string(volpath)).Output()
-							if err != nil {
-								log.Printf("diskutil umount error: %v", err)
-							}
-							log.Printf("%s", out)
+							/*							out, err := exec.Command("diskutil", "umount", string(volpath)).Output()
+														if err != nil {
+															log.Printf("diskutil umount error: %v", err)
+														}
+														log.Printf("%s", out)*/
 
 							files := make(map[string]bool)
+
+							toIgnore := make(map[string]bool)
+							toIgnore[".Spotlight-V100"] = true
+							toIgnore[".fseventsd"] = true
+							toIgnore["System Volume Information"] = true
 
 							err = filepath.Walk(dest, func(fpath string, info fs.FileInfo, err error) error {
 
@@ -451,6 +466,20 @@ func run(ctx context.Context, c *config, stdout io.Writer) error {
 								idx := strings.Index(fpath, dest)
 
 								fpath = fpath[idx+len(dest):]
+
+								idx = strings.Index(fpath, "/")
+
+								if idx > 0 {
+
+									dir := fpath[:idx]
+
+									if _, ok := toIgnore[dir]; ok {
+										log.Printf("dir ignored: %s", dir)
+
+										return nil
+									}
+
+								}
 
 								if len(fpath) > 0 {
 
