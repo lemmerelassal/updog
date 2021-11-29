@@ -528,7 +528,7 @@ func run(ctx context.Context, c *config, stdout io.Writer) error {
 				currentDirs = tempDirs
 
 				if hasIncremental {
-					wg.Wait()
+					//wg.Wait()
 					/* 					err := beeep.Notify("Title", "Safe to remove USB drive", "assets/information.png")
 					   					if err != nil {
 					   						log.Printf("error in beeep: %v", err)
